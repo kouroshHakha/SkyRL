@@ -178,20 +178,22 @@ class BasePPOExp:
         else:
             return None
 
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
+    def get_generator(self):
         """Initializes the generator.
 
         Returns:
             GeneratorInterface: The generator.
         """
         from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        
+        inference_engine_client = self.get_inference_engine_client()
 
         return SkyRLGymGenerator(
-            generator_cfg=cfg.generator,
-            skyrl_gym_cfg=cfg.environment.skyrl_gym,
+            generator_cfg=self.cfg.generator,
+            skyrl_gym_cfg=self.cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
-            tokenizer=tokenizer,
-            model_name=cfg.trainer.policy.model.path,
+            tokenizer=self.tokenizer,
+            model_name=self.cfg.trainer.policy.model.path,
         )
 
     def get_trainer(
@@ -233,6 +235,21 @@ class BasePPOExp:
             backends=self.cfg.trainer.logger,
             config=self.cfg,
         )
+        
+        
+    def get_inference_engine_client(self):
+        """Initializes the inference engine client.
+
+        Returns:
+            InferenceEngineClient: The inference engine client.
+        """
+
+        if self.cfg.generator.run_engines_locally:
+            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, self.tokenizer)
+        else:
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
+
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
     def _setup_trainer(self):
         """Setup and return the trainer.
@@ -262,16 +279,10 @@ class BasePPOExp:
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
-
         tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
 
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
-
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        inference_engine_client = self.get_inference_engine_client()
+        generator: GeneratorInterface = self.get_generator()
 
         trainer = self.get_trainer(
             cfg=self.cfg,
