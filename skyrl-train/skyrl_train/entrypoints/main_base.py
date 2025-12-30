@@ -244,6 +244,22 @@ class BasePPOExp:
             config=self.cfg,
         )
 
+    def get_inference_engine_client(self) -> InferenceEngineClient:
+        """Initializes the inference engine client.
+
+        Returns:
+            InferenceEngineClient: The inference engine client.
+        """
+        tokenizer = self.tokenizer
+        if self.cfg.generator.run_engines_locally:
+            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
+        else:
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+
+        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
+        
+        return inference_engine_client
+        
     def _setup_trainer(self):
         """Setup and return the trainer.
 
@@ -274,14 +290,10 @@ class BasePPOExp:
         tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
-
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
-
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        
+        inference_engine_client = self.get_inference_engine_client()
+        generator: GeneratorInterface = self.get_generator(
+            self.cfg, tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
             cfg=self.cfg,

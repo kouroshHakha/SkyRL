@@ -2,7 +2,18 @@
 # bash examples/remote_inference_engine/run_vllm_server.sh
 set -x
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
+export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
+
+
+export NCCL_P2P_DISABLE=1          # Disable P2P (often helps with PCIe-only setups)
+export NCCL_SHM_DISABLE=0          # Enable shared memory
+export NCCL_NET_GDR_LEVEL=0        # Disable GPUDirect RDMA
+export NCCL_IB_DISABLE=1           # Disable InfiniBand
+export NCCL_DEBUG=INFO             # Get more debug info
+
+    # --env-file /home/ray/default/work_skyrl/.env \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm \
+    -m skyrl_train.inference_engines.vllm.vllm_server \
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --tensor-parallel-size 4 \
     --host 127.0.0.1 \

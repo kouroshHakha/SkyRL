@@ -10,6 +10,8 @@ from typing import List, Optional, Any, Dict
 import json
 from transformers import PreTrainedTokenizerBase
 
+from loguru import logger
+
 
 class RemoteWeightLoader(WeightLoader):
     """Loads weights into remote inference engine via HTTP.
@@ -54,6 +56,7 @@ class RemoteWeightLoader(WeightLoader):
         """
         path = "/init_weights_update_group" if self._engine_backend == "sglang" else "/init_weight_update_communicator"
         async with aiohttp.ClientSession() as session:
+            logger.info(f"Calling {self._url}{path} with params: {master_address}, {master_port}, {rank_offset}, {world_size}, {group_name}, {backend}, {override_existing}")
             async with session.post(
                 f"{self._url}{path}",
                 json={

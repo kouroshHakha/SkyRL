@@ -284,6 +284,7 @@ class Worker(DistributedTorchRayActor):
             group_name = "skyrl"
             self._model_update_group_name = group_name
 
+            logger.info(f"Initializing weight sync state for group name: {group_name}, master_addr: {master_addr}, master_port: {master_port}, world_size: {world_size}, backend: {backend}, override_existing: {override_existing}")
             tasks = []
             tasks.append(
                 inference_engine_client.init_weight_update_communicator(

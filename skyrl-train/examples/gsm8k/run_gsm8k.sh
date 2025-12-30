@@ -17,7 +17,12 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 # : "${INFERENCE_BACKEND:=sglang}"
 
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
+export WANDB_API_KEY=d8e634782d7182de6b7105e67e02d926e6b68867
+
+SKYRL_PYTHONPATH_EXPORT=1 uv run --extra $INFERENCE_BACKEND \
+  --env-file /home/ray/default/work_skyrl/.env \
+  -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

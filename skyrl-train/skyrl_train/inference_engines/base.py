@@ -106,6 +106,9 @@ class InferenceEngineInterface(ABC):
     def dp_size(self) -> int:
         """Return the data parallel size of this inference engine."""
         raise NotImplementedError()
+    
+    def world_size(self) -> int:
+        return self.tp_size() * self.pp_size() * self.dp_size()
 
     @abstractmethod
     async def abort_generation(self) -> None:

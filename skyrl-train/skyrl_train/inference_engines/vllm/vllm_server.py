@@ -18,6 +18,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
 from fastapi import Request
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
+import ray
 
 
 # TODO(tgriggs): Handle errors and use best practices for vLLM server
@@ -149,6 +150,12 @@ class VllmServer:
 
 
 if __name__ == "__main__":
+    
+    ray.init(runtime_env={
+        "env_vars": {
+            "PYTHONPATH": "/home/ray/anaconda3/lib/python3.12/site-packages"
+        }
+    })
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()

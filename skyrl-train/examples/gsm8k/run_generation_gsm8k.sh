@@ -12,7 +12,11 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 INFERENCE_BACKEND="vllm"  # or "sglang"
 
-uv run --isolated --extra $INFERENCE_BACKEND \
+export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
+export WANDB_API_KEY=d8e634782d7182de6b7105e67e02d926e6b68867
+
+SKYRL_PYTHONPATH_EXPORT=1 uv run --extra $INFERENCE_BACKEND \
+  --env-file /home/ray/default/work_skyrl/.env \
   -m skyrl_train.entrypoints.main_generate \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
