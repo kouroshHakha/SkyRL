@@ -28,12 +28,12 @@ export NCCL_DEBUG=INFO             # Get more debug info
 # HACK (Kourosh): num_inference_engines must match the number of remote_inference_engine_urls
 SKYRL_PYTHONPATH_EXPORT=1 uv run --directory "$PROJECT_ROOT" --isolated --extra vllm0p12 \
     --env-file "$SCRIPT_DIR/.env" \
-    -m skyrl_train.entrypoints.main_base \
+    -m examples.remote_ray_serve_llm_engine.new_main \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
     generator.run_engines_locally=False \
-    generator.remote_inference_engine_urls="['127.0.0.1:8001', '127.0.0.1:8001']" \
+    generator.remote_inference_engine_urls="['http://127.0.0.1:8001']" \
     generator.num_inference_engines=2 \
     generator.weight_sync_backend="gloo" \
     generator.inference_engine_tensor_parallel_size="$INF_ENGINE_TP" \

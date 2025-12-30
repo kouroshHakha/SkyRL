@@ -351,10 +351,11 @@ def validate_generator_cfg(cfg: DictConfig):
             cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
         ), "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
 
-    if not cfg.generator.run_engines_locally:
-        assert cfg.generator.num_inference_engines == len(
-            cfg.generator.remote_inference_engine_urls
-        ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
+    # HACK (Kourosh)
+    # if not cfg.generator.run_engines_locally:
+    #     assert cfg.generator.num_inference_engines == len(
+    #         cfg.generator.remote_inference_engine_urls
+    #     ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
 
     if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
         assert (
