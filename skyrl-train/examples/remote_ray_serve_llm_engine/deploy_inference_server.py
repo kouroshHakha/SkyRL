@@ -26,6 +26,7 @@ from ray.llm._internal.serve.core.ingress.mixins import (
     CollectiveRpcIngressMixin,
     PausableIngressMixin,
     SleepableIngressMixin,
+    TokenizationIngressMixin,
 )
 from ray.llm._internal.serve.core.server.builder import build_llm_deployment
 from ray.llm._internal.serve.observability.logging import get_logger
@@ -160,6 +161,7 @@ ENDPOINTS = {
     **CollectiveRpcIngressMixin.ENDPOINTS,
     **PausableIngressMixin.ENDPOINTS,
     **SleepableIngressMixin.ENDPOINTS,
+    **TokenizationIngressMixin.ENDPOINTS,
     **DEFAULT_ENDPOINTS,
     **SkyRLIngress.ENDPOINTS,
 }
@@ -174,6 +176,9 @@ def build_skyrl_ingress(builder_config: dict) -> Application:
     - /pause, /resume, /is_paused (pause mode - keeps weights in GPU)
     - /reset_prefix_cache (cache management)
     - /collective_rpc (RLHF - execute RPC on all workers)
+    - /tokenize, /detokenize (tokenization - convert text to/from token IDs)
+    - /server_info (get deployment info like world_size)
+    - /init_weight_update_communicator (initialize weight sync for RLHF)
 
     Args:
         builder_config: Configuration conforming to LLMServingArgs.
@@ -187,7 +192,7 @@ def build_skyrl_ingress(builder_config: dict) -> Application:
             "llm_configs": [llm_config],
             "ingress_deployment_config": {}
         }
-        app = build_dev_openai_app(config)
+        app = build_skyrl_ingress(config)
         serve.run(app)
     """
     config = LLMServingArgs.model_validate(builder_config)

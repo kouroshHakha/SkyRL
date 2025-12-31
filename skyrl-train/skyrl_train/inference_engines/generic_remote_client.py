@@ -7,13 +7,15 @@ via HTTP, without being tightly coupled to a specific backend like vLLM or SGLan
 import aiohttp
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
+    InferenceEngineInput,
+    InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.weight_sync import WeightLoader
@@ -162,6 +164,62 @@ class GenericRemoteInferenceClient(InferenceEngineInterface):
         """Return the world size of the inference engine."""
         return self._world_size
 
+    async def tokenize(self, texts: List[str], add_special_tokens: bool = True) -> List[List[int]]:
+        """Tokenize texts using the remote server's tokenizer.
+
+        Uses vLLM's /tokenize endpoint. Requests are made concurrently for efficiency.
+
+        Args:
+            texts: List of text strings to tokenize.
+            add_special_tokens: Whether to add special tokens (e.g., BOS). Default True.
+
+        Returns:
+            List of token ID lists.
+        """
+        async def tokenize_single(session: aiohttp.ClientSession, text: str) -> List[int]:
+            resp = await session.post(
+                f"{self._url}/tokenize",
+                json={
+                    "model": self._model_name,
+                    "prompt": text,
+                    "add_special_tokens": add_special_tokens,
+                },
+            )
+            result = await resp.json()
+            return result["tokens"]
+
+        async with aiohttp.ClientSession() as session:
+            tasks = [tokenize_single(session, text) for text in texts]
+            results = await asyncio.gather(*tasks)
+        return list(results)
+
+    async def detokenize(self, token_ids: List[List[int]]) -> List[str]:
+        """Detokenize token IDs using the remote server's tokenizer.
+
+        Uses vLLM's /detokenize endpoint. Requests are made concurrently for efficiency.
+
+        Args:
+            token_ids: List of token ID lists to detokenize.
+
+        Returns:
+            List of decoded text strings.
+        """
+        async def detokenize_single(session: aiohttp.ClientSession, tokens: List[int]) -> str:
+            resp = await session.post(
+                f"{self._url}/detokenize",
+                json={
+                    "model": self._model_name,
+                    "tokens": tokens,
+                },
+            )
+            result = await resp.json()
+            return result["prompt"]
+
+        async with aiohttp.ClientSession() as session:
+            tasks = [detokenize_single(session, tokens) for tokens in token_ids]
+            results = await asyncio.gather(*tasks)
+        return list(results)
+
     async def sleep(self, *args: Any, **kwargs: Any):
         """Put the inference engine to sleep."""
         async with aiohttp.ClientSession() as session:
@@ -257,50 +315,137 @@ class GenericRemoteInferenceClient(InferenceEngineInterface):
                 "body": text,
             }
 
-    # Methods that are not implemented for generic remote inference engine
+    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+        """Generate completions for the given input batch.
 
-    def tp_size(self) -> int:
-        raise NotImplementedError(
-            "tp_size is not supported for generic remote inference engine"
+        Args:
+            input_batch: Input batch containing prompts or prompt_token_ids and sampling params.
+
+        Returns:
+            InferenceEngineOutput with responses, response_ids, stop_reasons, and optionally logprobs.
+        """
+        prompts = input_batch.get("prompts")
+        prompt_token_ids: Optional[List[List[int]]] = input_batch.get("prompt_token_ids")
+        sampling_params = input_batch.get("sampling_params") or {}
+
+        # Validate input - need either prompts or prompt_token_ids
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError("Either 'prompts' or 'prompt_token_ids' must be provided.")
+        if prompts is not None and prompt_token_ids is not None:
+            raise ValueError("Only one of 'prompts' or 'prompt_token_ids' should be provided, not both.")
+
+        # If prompts provided, tokenize them first
+        if prompts is not None:
+            # For chat-style prompts, we need to apply chat template on the server
+            # For now, assume prompts are already formatted strings
+            prompt_texts = prompts if isinstance(prompts[0], str) else [str(p) for p in prompts]
+            prompt_token_ids = await self.tokenize(prompt_texts)
+
+        if "n" in sampling_params and sampling_params["n"] > 1:
+            raise ValueError(
+                "n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead."
+            )
+
+        # Send request to /v1/completions endpoint (vLLM compatible)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            payload = sampling_params.copy()
+            payload["model"] = self._model_name
+            payload["prompt"] = prompt_token_ids
+
+            async with session.post(
+                f"{self._url}/v1/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                response = await resp.json()
+
+        # Parse the response
+        outputs: List[str] = []
+        output_ids: List[List[int]] = []
+        finish_reasons: List[str] = []
+
+        for i, choice in enumerate(response.get("choices", [])):
+            # Since n=1, index i represents the output for `prompt[i]`
+            assert choice["index"] == i, f"Expected choices to be ordered by index, got {choice['index']} at position {i}"
+            text = choice["text"]
+            outputs.append(text)
+            finish_reasons.append(choice["finish_reason"])
+
+        # Tokenize the output texts to get token IDs (no special tokens for outputs)
+        if outputs:
+            output_ids = await self.tokenize(outputs, add_special_tokens=False)
+
+        return InferenceEngineOutput(
+            responses=outputs,
+            response_ids=output_ids,
+            stop_reasons=finish_reasons,
+            response_logprobs=None,
         )
 
-    def pp_size(self) -> int:
-        raise NotImplementedError(
-            "pp_size is not supported for generic remote inference engine"
-        )
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle OpenAI-compatible chat completion request.
 
-    def dp_size(self) -> int:
-        raise NotImplementedError(
-            "dp_size is not supported for generic remote inference engine"
-        )
+        Args:
+            request_payload: Dict with 'json' key containing the request body.
 
-    def ep_size(self) -> int:
-        raise NotImplementedError(
-            "ep_size is not supported for generic remote inference engine"
-        )
+        Returns:
+            The chat completion response from the server.
+        """
+        body = request_payload.get("json", {})
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            async with session.post(
+                f"{self._url}/v1/chat/completions",
+                json=body,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                return await resp.json()
 
-    async def generate(self, *args, **kwargs) -> Any:
-        raise NotImplementedError(
-            "generate is not supported for generic remote inference engine"
-        )
+    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle OpenAI-compatible completion request.
 
-    async def chat_completion(self, *args, **kwargs) -> Any:
-        raise NotImplementedError(
-            "chat_completion is not supported for generic remote inference engine"
-        )
+        Args:
+            request_payload: Dict with 'json' key containing the request body.
 
-    async def completion(self, *args, **kwargs) -> Any:
-        raise NotImplementedError(
-            "completion is not supported for generic remote inference engine"
-        )
+        Returns:
+            The completion response from the server.
+        """
+        body = request_payload.get("json", {})
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+            async with session.post(
+                f"{self._url}/v1/completions",
+                json=body,
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                return await resp.json()
 
     async def abort_generation(self) -> None:
-        raise NotImplementedError(
-            "abort_generation is not supported for generic remote inference engine"
-        )
+        """Abort all running and waiting requests."""
+        # This could call a server endpoint if available
+        logger.warning("abort_generation called but not implemented for generic remote client")
 
     async def teardown(self) -> None:
-        raise NotImplementedError(
-            "teardown is not supported for generic remote inference engine"
-        )
+        """Clean up resources."""
+        try:
+            await self._weight_loader.destroy_group()
+        except Exception as e:
+            logger.warning(f"Error during teardown: {e}")
+
+    # Parallelism size methods - not applicable for generic remote client
+    # These are typically used for local engine resource management
+
+    def tp_size(self) -> int:
+        """Return tensor parallel size (not applicable for remote client)."""
+        return 1
+
+    def pp_size(self) -> int:
+        """Return pipeline parallel size (not applicable for remote client)."""
+        return 1
+
+    def dp_size(self) -> int:
+        """Return data parallel size (not applicable for remote client)."""
+        return 1
+
+    def ep_size(self) -> int:
+        """Return expert parallel size (not applicable for remote client)."""
+        return 1
 
