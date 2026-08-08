@@ -1441,6 +1441,14 @@ class TrainerConfig(BaseConfig):
     """Maximum prompt length during training.
     Prompts longer than this are filtered out of the train/eval datasets at load time, not
     truncated."""
+    max_train_sequence_length: Optional[int] = None
+    """Maximum total token length of an online training sequence (prompt plus response).
+
+    When set, the trainer removes trailing zero-loss response tokens first,
+    then left-truncates prompt history. A sequence whose loss-bearing response
+    alone exceeds the cap is dropped. This is distinct from
+    ``max_prompt_length``, which only filters source dataset prompts.
+    """
     flash_attn: bool = True
     disable_fast_tokenizer: bool = False
     project_name: str = "skyrl"

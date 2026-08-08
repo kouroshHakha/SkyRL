@@ -5,7 +5,73 @@ F1 over retrieved text intervals vs. ground-truth evidence spans. Used by
 per-trajectory wandb metrics over the parent/child rollout tree.
 """
 
+import random
+import threading
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Tuple
+
+
+_JUDGE_LIMITERS_LOCK = threading.Lock()
+_JUDGE_LIMITERS: dict[tuple[str, str, int], threading.BoundedSemaphore] = {}
+_JUDGE_RATE_LOCK = threading.Lock()
+_JUDGE_NEXT_REQUEST_AT: dict[tuple[str, str], float] = {}
+
+
+def _get_judge_limiter(base_url: str, model: str, max_concurrency: int) -> threading.BoundedSemaphore:
+    """Return the process-wide limiter for one hosted judge endpoint/model."""
+    if max_concurrency < 1:
+        raise ValueError(f"max_concurrency must be at least 1, got {max_concurrency}")
+    key = (base_url.rstrip("/"), model, max_concurrency)
+    with _JUDGE_LIMITERS_LOCK:
+        limiter = _JUDGE_LIMITERS.get(key)
+        if limiter is None:
+            limiter = threading.BoundedSemaphore(max_concurrency)
+            _JUDGE_LIMITERS[key] = limiter
+        return limiter
+
+
+def _wait_for_judge_request(base_url: str, model: str, min_interval_seconds: float) -> None:
+    """Reserve the next process-wide request slot for an endpoint/model."""
+    if min_interval_seconds < 0:
+        raise ValueError(f"min_interval_seconds must be non-negative, got {min_interval_seconds}")
+    key = (base_url.rstrip("/"), model)
+    while True:
+        with _JUDGE_RATE_LOCK:
+            now = time.monotonic()
+            next_request_at = _JUDGE_NEXT_REQUEST_AT.get(key, 0.0)
+            if now >= next_request_at:
+                _JUDGE_NEXT_REQUEST_AT[key] = now + min_interval_seconds
+                return
+            delay = next_request_at - now
+        time.sleep(delay)
+
+
+def _defer_judge_requests(base_url: str, model: str, cooldown_seconds: float) -> None:
+    """Push the shared request slot forward after a provider throttle."""
+    key = (base_url.rstrip("/"), model)
+    with _JUDGE_RATE_LOCK:
+        _JUDGE_NEXT_REQUEST_AT[key] = max(
+            _JUDGE_NEXT_REQUEST_AT.get(key, 0.0),
+            time.monotonic() + cooldown_seconds,
+        )
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse Retry-After's seconds or HTTP-date form."""
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +302,52 @@ def _extract_gt_strings(evidence: List[Any]) -> List[str]:
     return out
 
 
+def _resolve_judge_api_key(base_url: str, api_key: str | None = None) -> str:
+    import os
+
+    if api_key:
+        return api_key
+    normalized = base_url.lower()
+    if "openrouter.ai" in normalized:
+        return os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPEN_ROUTER_KEY") or ""
+    if "moonshot.ai" in normalized:
+        return os.environ.get("MOONSHOT_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    return os.environ.get("OPENAI_API_KEY") or ""
+
+
+def _parse_judge_result(content: str) -> dict | None:
+    import json
+    import re
+
+    text = (content or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def judge_reward(
     final_answer: str,
     question: str,
     evidence: List[Any],
     model: str = "gpt-4.1-nano",
     base_url: str = "https://api.openai.com/v1",
+    api_key: str | None = None,
+    reasoning_effort: str = "low",
+    max_concurrency: int = 1,
+    min_interval_seconds: float = 5.0,
 ) -> Tuple[float, float, float]:
     """Score a final answer with an LLM judge.
 
@@ -250,10 +356,7 @@ def judge_reward(
     """
     import ast
     import json
-    import os
     import textwrap
-    import time
-
     import httpx
     from loguru import logger
 
@@ -313,53 +416,87 @@ def judge_reward(
            1 — no relevant content retrieved
 
         Provide a brief reasoning string (2-4 sentences) explaining the scores.
+        Return JSON only with keys precision_score, recall_score, and reasoning.
     """
     )
 
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable must be set when using a judge reward")
-
     base_url = base_url.rstrip("/")
-    result = None
-    for attempt in range(5):
-        if attempt > 0:
-            time.sleep(2**attempt)
-        try:
-            with httpx.Client(timeout=60) as client:
-                resp = client.post(
-                    f"{base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": user_msg}],
-                        "temperature": 0,
-                        "response_format": _RUBRIC_RESPONSE_FORMAT,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as e:
-            if attempt == 4:
-                logger.warning(f"Judge reward model failed after 5 attempts: {e}")
-                return 0.0, 0.0, 0.0
-            logger.warning(f"Judge reward model attempt {attempt + 1} failed: {e}, retrying...")
-            continue
+    resolved_key = _resolve_judge_api_key(base_url, api_key)
+    if not resolved_key:
+        raise ValueError(
+            "No API key found for judge reward. Set OPENROUTER_API_KEY / OPEN_ROUTER_KEY "
+            "for OpenRouter judges, or OPENAI_API_KEY for OpenAI judges."
+        )
 
-        try:
-            result = json.loads(data["choices"][0]["message"]["content"])
-            break
-        except json.JSONDecodeError:
+    is_openrouter = "openrouter.ai" in base_url.lower()
+    is_moonshot = "moonshot.ai" in base_url.lower()
+    body: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": user_msg}],
+        "temperature": 0,
+    }
+    if is_openrouter:
+        body["reasoning"] = {"effort": reasoning_effort}
+    elif is_moonshot or "kimi" in model.lower():
+        body["reasoning_effort"] = reasoning_effort
+
+    result = None
+    limiter = _get_judge_limiter(base_url, model, max_concurrency)
+    # Keep a permit through retries so concurrently failed requests do not
+    # wake together and immediately re-create the provider-side rate burst.
+    with limiter:
+        retry_delay = 0.0
+        for attempt in range(5):
+            if retry_delay:
+                time.sleep(retry_delay)
+            _wait_for_judge_request(base_url, model, min_interval_seconds)
+            request_body = dict(body)
+            # First try structured output; later attempts fall back to free-form JSON.
+            if attempt < 2:
+                request_body["response_format"] = _RUBRIC_RESPONSE_FORMAT
+            try:
+                with httpx.Client(timeout=120) as client:
+                    resp = client.post(
+                        f"{base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {resolved_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=request_body,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+            except Exception as e:
+                if attempt == 4:
+                    logger.warning(f"Judge reward model failed after 5 attempts: {e}")
+                    return 0.0, 0.0, 0.0
+                retry_after = None
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
+                    retry_after = _retry_after_seconds(e.response.headers.get("Retry-After"))
+                exponential_delay = 2**attempt
+                retry_delay = max(exponential_delay, retry_after or 0.0) + random.uniform(
+                    0.0, exponential_delay * 0.25
+                )
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 429:
+                    _defer_judge_requests(base_url, model, retry_delay)
+                logger.warning(
+                    f"Judge reward model attempt {attempt + 1} failed: {e}; "
+                    f"retrying in {retry_delay:.1f}s..."
+                )
+                continue
+
+            content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            result = _parse_judge_result(content)
+            if result is not None:
+                break
             if attempt == 4:
+                logger.warning(f"Judge reward model returned unparseable JSON: {content[:500]!r}")
                 return 0.0, 0.0, 0.0
-            continue
+            retry_delay = 2**attempt + random.uniform(0.0, (2**attempt) * 0.25)
 
     if result is None:
         return 0.0, 0.0, 0.0
 
-    precision = result.get("precision_score", 0) / 10.0
-    recall = result.get("recall_score", 0) / 10.0
+    precision = float(result.get("precision_score", 0)) / 10.0
+    recall = float(result.get("recall_score", 0)) / 10.0
     return (precision + recall) / 2.0, precision, recall

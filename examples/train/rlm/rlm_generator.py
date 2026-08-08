@@ -130,6 +130,18 @@ class RLMGymGenerator(SkyRLGymGenerator):
         env_extras["rlm_rollout_id"] = ctx.rid
         env_extras["depth"] = ctx.depth
 
+        # Propagate configurable judge settings from generator config when present.
+        for key in (
+            "judge_model",
+            "judge_base_url",
+            "judge_reasoning_effort",
+            "judge_max_concurrency",
+            "judge_min_interval_seconds",
+        ):
+            value = getattr(self.generator_cfg, key, None)
+            if value is not None and key not in env_extras:
+                env_extras[key] = value
+
         loop = asyncio.get_running_loop()
         env_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, ctx.rid)
         if getattr(self.generator_cfg, "enable_child_agents", True):

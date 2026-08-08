@@ -401,12 +401,22 @@ class SkyRLGymGenerator(GeneratorInterface):
                     agent_loop_state.loss_mask = []
                     agent_loop_state.rollout_logprobs = None
 
-                engine_input = InferenceEngineInput(
-                    prompt_token_ids=[agent_loop_state.input_ids],
-                    session_ids=[session_id],
-                    sampling_params=sampling_params,
-                    cache_salt=cache_salt,
-                )
+                # Hosted OpenAI-compatible engines (e.g. OpenRouter) need the
+                # structured chat history; token-id decode collapses roles.
+                if getattr(self.inference_engine_client, "prefers_chat_prompts", False):
+                    engine_input = InferenceEngineInput(
+                        prompts=[chat_history],
+                        session_ids=[session_id],
+                        sampling_params=sampling_params,
+                        cache_salt=cache_salt,
+                    )
+                else:
+                    engine_input = InferenceEngineInput(
+                        prompt_token_ids=[agent_loop_state.input_ids],
+                        session_ids=[session_id],
+                        sampling_params=sampling_params,
+                        cache_salt=cache_salt,
+                    )
                 llm_call_start_time = time.monotonic()
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
                 time_splits["llm"] += time.monotonic() - llm_call_start_time

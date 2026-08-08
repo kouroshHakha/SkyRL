@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -86,6 +86,161 @@ def _reward_to_numpy(custom_reward: Union[List[float], torch.Tensor]) -> np.ndar
     if reward_arr.ndim != 1:
         raise ValueError(f"Expected a 1D per-token reward sequence, got shape {reward_arr.shape}")
     return reward_arr
+
+
+def cap_training_sequences(
+    prompts: List[List[int]],
+    responses: List[List[int]],
+    rewards: List[Union[List[float], torch.Tensor]],
+    loss_masks: List[List[int]],
+    logprobs: Optional[List[List[float]]] = None,
+    rollout_expert_indices: Optional[List[RoutedExpertIndices]] = None,
+    max_train_sequence_length: Optional[int] = None,
+) -> Tuple[
+    List[List[int]],
+    List[List[int]],
+    List[Union[List[float], torch.Tensor]],
+    List[List[int]],
+    Optional[List[List[float]]],
+    Optional[List[RoutedExpertIndices]],
+    List[int],
+    Dict[str, int],
+]:
+    """Bound training examples without discarding loss-bearing action tokens.
+
+    Tool observations are represented as trailing response tokens with a zero
+    loss mask.  Remove those first, then retain the most recent prompt suffix.
+    A sample whose action tokens alone exceed the budget is dropped rather than
+    silently training on a truncated action.
+    """
+    if max_train_sequence_length is None:
+        return (
+            prompts,
+            responses,
+            rewards,
+            loss_masks,
+            logprobs,
+            rollout_expert_indices,
+            list(range(len(prompts))),
+            {
+                "capped_sequences": 0,
+                "dropped_sequences": 0,
+                "truncated_observation_tokens": 0,
+                "truncated_prompt_tokens": 0,
+            },
+        )
+    if max_train_sequence_length <= 0:
+        raise ValueError(f"max_train_sequence_length must be positive, got {max_train_sequence_length}")
+
+    _verify_inputs(prompts, responses, rewards, loss_masks)
+    if logprobs is not None and len(logprobs) != len(prompts):
+        raise ValueError("logprobs must contain one entry per training sequence")
+    if rollout_expert_indices is not None and len(rollout_expert_indices) != len(prompts):
+        raise ValueError("rollout_expert_indices must contain one entry per training sequence")
+
+    capped_prompts: List[List[int]] = []
+    capped_responses: List[List[int]] = []
+    capped_rewards: List[Union[List[float], torch.Tensor]] = []
+    capped_loss_masks: List[List[int]] = []
+    capped_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
+    capped_expert_indices: Optional[List[RoutedExpertIndices]] = [] if rollout_expert_indices is not None else None
+    kept_indices: List[int] = []
+    stats = {
+        "capped_sequences": 0,
+        "dropped_sequences": 0,
+        "truncated_observation_tokens": 0,
+        "truncated_prompt_tokens": 0,
+    }
+
+    for index, (prompt, response, reward, loss_mask) in enumerate(zip(prompts, responses, rewards, loss_masks)):
+        if not (len(response) == len(loss_mask) == len(reward)):
+            raise ValueError(
+                f"Response, loss mask, and reward lengths must match at index {index}; got "
+                f"{len(response)}, {len(loss_mask)}, and {len(reward)}"
+            )
+
+        capped_prompt = prompt
+        capped_response = response
+        capped_reward = reward
+        capped_loss_mask = loss_mask
+        total_length = len(capped_prompt) + len(capped_response)
+        if total_length > max_train_sequence_length:
+            stats["capped_sequences"] += 1
+            overflow = total_length - max_train_sequence_length
+
+            # Only zero-loss tokens at the response suffix are safe to remove
+            # without changing the policy action being optimized.
+            trailing_observation_tokens = 0
+            for token_mask in reversed(capped_loss_mask):
+                if token_mask != 0:
+                    break
+                trailing_observation_tokens += 1
+            observation_trim = min(overflow, trailing_observation_tokens)
+            if observation_trim:
+                capped_response = capped_response[:-observation_trim]
+                capped_reward = capped_reward[:-observation_trim]
+                capped_loss_mask = capped_loss_mask[:-observation_trim]
+                overflow -= observation_trim
+                stats["truncated_observation_tokens"] += observation_trim
+
+            # Preserve the entire response/action and retain the newest prompt
+            # context when its history alone exceeds the remaining budget.
+            prompt_trim = min(overflow, len(capped_prompt))
+            if prompt_trim:
+                capped_prompt = capped_prompt[prompt_trim:]
+                overflow -= prompt_trim
+                stats["truncated_prompt_tokens"] += prompt_trim
+
+            if overflow:
+                # The loss-bearing response itself exceeds the configured
+                # maximum. Drop it instead of silently changing the action.
+                stats["dropped_sequences"] += 1
+                continue
+
+        capped_prompts.append(capped_prompt)
+        capped_responses.append(capped_response)
+        capped_rewards.append(capped_reward)
+        capped_loss_masks.append(capped_loss_mask)
+        kept_indices.append(index)
+        if capped_logprobs is not None:
+            assert logprobs is not None
+            capped_logprobs.append(logprobs[index][: len(capped_response)])
+        if capped_expert_indices is not None:
+            assert rollout_expert_indices is not None
+            expert_indices = rollout_expert_indices[index]
+            # Route records are a prefix of the original sequence. Keep only
+            # the captured routes that remain after prompt/response cropping.
+            prompt_trim = len(prompt) - len(capped_prompt)
+            max_captured_tokens = len(capped_prompt) + len(capped_response)
+            expert_indices = expert_indices[prompt_trim:max_captured_tokens]
+            if len(expert_indices) == 0:
+                stats["dropped_sequences"] += 1
+                capped_prompts.pop()
+                capped_responses.pop()
+                capped_rewards.pop()
+                capped_loss_masks.pop()
+                kept_indices.pop()
+                if capped_logprobs is not None:
+                    capped_logprobs.pop()
+                continue
+            capped_expert_indices.append(expert_indices)
+
+    if not capped_prompts:
+        raise ValueError(
+            "All training sequences exceeded trainer.max_train_sequence_length; "
+            "increase the cap or reduce generated/tool-observation lengths."
+        )
+
+    return (
+        capped_prompts,
+        capped_responses,
+        capped_rewards,
+        capped_loss_masks,
+        capped_logprobs,
+        capped_expert_indices,
+        kept_indices,
+        stats,
+    )
 
 
 def convert_prompts_responses_to_batch_tensors(

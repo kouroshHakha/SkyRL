@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from skyrl.train.dataset.preprocess import (
+    cap_training_sequences,
     convert_prompts_responses_to_batch_tensors,
     make_router_padding_mask,
 )
@@ -64,6 +65,50 @@ def test_router_padding_mask_marks_left_padding_and_uncaptured_suffix():
     mask = make_router_padding_mask(attention_mask, [2, 4])
 
     assert mask.tolist() == [[True, False, False, True], [False, False, False, False]]
+
+
+def test_cap_training_sequences_preserves_actions_and_drops_oversized_actions():
+    (
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+        logprobs,
+        _,
+        kept_indices,
+        stats,
+    ) = cap_training_sequences(
+        prompts=[[1, 2, 3, 4], [11, 12, 13, 14, 15, 16, 17], []],
+        responses=[[6, 7, 8, 9, 10], [18, 19], [20, 21, 22, 23, 24, 25, 26]],
+        rewards=[
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ],
+        loss_masks=[[1, 1, 0, 0, 0], [1, 1], [1, 1, 1, 1, 1, 1, 1]],
+        logprobs=[[0.1, 0.2, 0.0, 0.0, 0.0], [0.3, 0.4], [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1]],
+        max_train_sequence_length=6,
+    )
+
+    # First remove the three trailing observation tokens, keeping all action tokens.
+    assert prompts[0] == [1, 2, 3, 4]
+    assert responses[0] == [6, 7]
+    assert loss_masks[0] == [1, 1]
+    assert rewards[0] == [0.0, 1.0]
+    assert logprobs[0] == [0.1, 0.2]
+
+    # Then remove old prompt history when there are no zero-loss observation tokens.
+    assert prompts[1] == [14, 15, 16, 17]
+    assert responses[1] == [18, 19]
+
+    # A response containing only loss-bearing tokens that cannot fit is dropped.
+    assert kept_indices == [0, 1]
+    assert stats == {
+        "capped_sequences": 3,
+        "dropped_sequences": 1,
+        "truncated_observation_tokens": 3,
+        "truncated_prompt_tokens": 3,
+    }
 
 
 def test_routed_expert_tensor_uses_unique_dummy_routes(tokenizer):

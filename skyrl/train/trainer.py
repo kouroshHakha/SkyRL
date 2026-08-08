@@ -53,6 +53,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    cap_training_sequences,
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
     convert_prompts_responses_to_batch_tensors,
@@ -873,6 +874,40 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
         rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
+
+        (
+            prompt_ids,
+            response_ids,
+            rewards,
+            loss_masks,
+            logprobs,
+            rollout_expert_indices,
+            kept_indices,
+            truncation_stats,
+        ) = cap_training_sequences(
+            prompt_ids,
+            response_ids,
+            rewards,
+            loss_masks,
+            logprobs,
+            rollout_expert_indices,
+            max_train_sequence_length=self.cfg.trainer.max_train_sequence_length,
+        )
+        if len(kept_indices) != len(uids):
+            uids = [uids[index] for index in kept_indices]
+            is_last_step = generator_output.get("is_last_step", None)
+            if is_last_step is not None:
+                generator_output["is_last_step"] = [is_last_step[index] for index in kept_indices]
+        if truncation_stats["capped_sequences"]:
+            logger.warning(
+                "Capped %d training sequences: removed %d trailing zero-loss response tokens "
+                "and %d prompt-history tokens; dropped %d sequences whose action exceeded the cap.",
+                truncation_stats["capped_sequences"],
+                truncation_stats["truncated_observation_tokens"],
+                truncation_stats["truncated_prompt_tokens"],
+                truncation_stats["dropped_sequences"],
+            )
+            self.all_metrics.update({f"trainer/{key}": value for key, value in truncation_stats.items()})
 
         pixel_values = generator_output.get("pixel_values", None)
         image_grid_thw = generator_output.get("image_grid_thw", None)

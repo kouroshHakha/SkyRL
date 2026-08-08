@@ -241,17 +241,38 @@ class EvidenceRLMEnv(BaseRLMEnv):
     """
 
     SYSTEM_PROMPT = MULTIPAPER_CHILD_SYSTEM_PROMPT
-    JUDGE_MODEL = "gpt-5.4-mini-2026-03-17"
-    JUDGE_BASE_URL = "https://api.openai.com/v1"
+    JUDGE_MODEL = "moonshotai/kimi-k3"
+    JUDGE_BASE_URL = "https://openrouter.ai/api/v1"
+    JUDGE_REASONING_EFFORT = "low"
+
+    def _judge_kwargs(self) -> dict:
+        """Resolve judge settings from extras, falling back to class defaults."""
+        return {
+            "model": self.extras.get("judge_model") or self.JUDGE_MODEL,
+            "base_url": self.extras.get("judge_base_url") or self.JUDGE_BASE_URL,
+            "reasoning_effort": self.extras.get("judge_reasoning_effort") or self.JUDGE_REASONING_EFFORT,
+            "max_concurrency": (
+                self.extras["judge_max_concurrency"] if self.extras.get("judge_max_concurrency") is not None else 1
+            ),
+            "min_interval_seconds": (
+                self.extras["judge_min_interval_seconds"]
+                if self.extras.get("judge_min_interval_seconds") is not None
+                else 5.0
+            ),
+            "api_key": self.extras.get("judge_api_key"),
+        }
 
     def _get_reward(self, final_answer: str) -> float:
+        if self.extras.get("skip_judge"):
+            self._judge_precision = 0.0
+            self._judge_recall = 0.0
+            return 0.0
         evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
         reward, precision, recall = judge_reward(
             final_answer,
             question=self._root_prompt,
             evidence=evidence,
-            model=self.JUDGE_MODEL,
-            base_url=self.JUDGE_BASE_URL,
+            **self._judge_kwargs(),
         )
         self._judge_precision = precision
         self._judge_recall = recall
@@ -288,18 +309,7 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
         depth = self.extras.get("depth", 0)
         if depth > 0:
             return 0.0  # short circuit child rewards to 0
-
-        evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
-        reward, precision, recall = judge_reward(
-            final_answer,
-            question=self._root_prompt,
-            evidence=evidence,
-            model=self.JUDGE_MODEL,
-            base_url=self.JUDGE_BASE_URL,
-        )
-        self._judge_precision = precision
-        self._judge_recall = recall
-        return reward
+        return super()._get_reward(final_answer)
 
     def _get_system_prompt(self) -> str:
         depth = self.extras.get("depth", 0)

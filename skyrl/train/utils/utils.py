@@ -785,6 +785,15 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    # RLM evidence rewards can use Kimi through OpenRouter. Ray workers are
+    # spawned by the raylet, so credentials loaded by the driver from `.env`
+    # must be explicitly included in its runtime environment. Do not log
+    # values here.
+    for var_name in ("OPENROUTER_API_KEY", "OPEN_ROUTER_KEY"):
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting {var_name} to ray runtime env")
+            env_vars[var_name] = value
+
     # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
     for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
         if value := os.environ.get(var_name):

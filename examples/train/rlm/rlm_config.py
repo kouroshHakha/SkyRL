@@ -21,3 +21,20 @@ class RLMGeneratorConfig(GeneratorConfig):
     frozen_openrouter_model: Optional[str] = None
     """When set, in-REPL ``llm_query`` calls use this frozen model via OpenRouter
     instead of the policy engine."""
+    hosted_openrouter_model: Optional[str] = None
+    """When set, the eval entry point uses OpenRouter as the primary policy engine
+    instead of launching / connecting to a local vLLM deployment."""
+    hosted_openrouter_reasoning_effort: str = "none"
+    """Reasoning effort for the hosted OpenRouter policy model."""
+    judge_model: Optional[str] = None
+    """Override the evidence judge model id (e.g. ``moonshotai/kimi-k3``)."""
+    judge_base_url: Optional[str] = None
+    """Override the evidence judge OpenAI-compatible base URL."""
+    judge_reasoning_effort: str = "low"
+    """Reasoning effort for the judge model when the endpoint supports it."""
+    judge_max_concurrency: int = 1
+    """Maximum concurrent evidence-judge requests per Ray worker."""
+    judge_min_interval_seconds: float = 5.0
+    """Minimum spacing between evidence-judge requests per Ray worker."""
+    trace_output_dir: Optional[str] = None
+    """When set, RLMGymGenerator writes visualization-compatible per-rollout traces here."""
